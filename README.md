@@ -1,71 +1,139 @@
 # Rubbish-Video-Generator
 
-[B站讲解](https://www.bilibili.com/video/BV1Ap4y1y7o7)
-希望从中获得帮助的uu们可以给up一个三连支持一下!
+Local, no-account port of [wmathor/Rubbish-Video-Generator](https://github.com/wmathor/Rubbish-Video-Generator) (讲解: [Bilibili BV1Ap4y1y7o7](https://www.bilibili.com/video/BV1Ap4y1y7o7)).
 
-营销号**视频**生成器~仅供娱乐
+The upstream project is a **营销号 template assembler**, licensed **CC BY-NC-SA 4.0**. It is not a text-to-video model. This fork keeps that job and drops the paid iFlytek voice.
 
-功能：自动生成文本，自动添加字幕，自动给视频配音（人声）
+## What a run actually produces
 
-- [1.1版本更新](https://github.com/wmathor/Rubbish-Video-Generator#bug11%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0 )
-- [下载](https://github.com/wmathor/Rubbish-Video-Generator#%E4%B8%8B%E8%BD%BD)
-- [如何使用](https://github.com/wmathor/Rubbish-Video-Generator#%E5%A6%82%E4%BD%95%E4%BD%BF%E7%94%A8 )
-  - [示例](https://github.com/wmathor/Rubbish-Video-Generator#%E7%A4%BA%E4%BE%8B )
-- [设计思路](https://github.com/wmathor/Rubbish-Video-Generator#%E8%AE%BE%E8%AE%A1%E6%80%9D%E8%B7%AF )
-- [LICENSE](https://github.com/wmathor/Rubbish-Video-Generator#license)
+From three short phrases it fills eight fixed Chinese lines, for example `核桃核不能吞下去是怎么回事呢？`. It then:
 
-### :bug:1.1版本更新
+1. Loops or trims a video you supply to the target length (50 seconds matches the original slots).
+2. Mixes a background track at -20 dB.
+3. Burns the lines on as subtitles.
+4. Speaks the lines with a **local** voice and places each line in its original time slot.
 
-- 修复了原视频带有bgm，最终生成的视频没有声音的问题
-- 现在支持手动设定字体大小，在`args.txt`文件中的第五行进行设置
+The picture is your file, or an FFmpeg test pattern if you ask for one. Nothing in this repository invents scenes, people, or photorealistic footage from a prompt. There is no posting step and no virality score.
 
-### 下载
+## Gaps versus upstream 1.1
 
-```shell
-$ git clone https://github.com/wmathor/Rubbish-Video-Generator.git
-```
+| Upstream | This port |
+| --- | --- |
+| iFlytek streaming TTS, voice `xiaoyan`, credentials on `args.txt` line 4 | Line 4 is ignored and never sent. Speech is local Piper or espeak-ng. |
+| moviepy 1.0 TextClip + ImageMagick + SimHei | Subtitles are burned with FFmpeg libass and a CJK font already on the machine. |
+| Bundled `ffmpeg.exe` / `ffprobe.exe` | Those Windows binaries are not executed. System `ffmpeg` and `ffprobe` are required. |
+| Fixed 50 second cut | Default is still 50 seconds. 8–180 seconds is allowed; other lengths scale the same eight slots, which squishes the speech. |
 
-### 如何使用
+Voice quality is not parity with iFlytek 小燕. On the sample script, Piper huayan fit every slot at 1.0x. espeak-ng needed about 1.3x–2.3x speedup and sounds robotic.
 
-moviepy == 1.0.0
+## Requirements
 
-python > 3.5
+Tested here: Ubuntu, CPython 3.12.3, FFmpeg 6.1.1 (libass, libx264, aac), espeak-ng 1.51, WenQuanYi Micro Hei. No GPU. No API key. No account.
 
-自行安装ImageMagick
-
-缺少的库自行pip
-
-如果报错'module 'websocket' has no attribute 'enableTrace''，请参考下面的解决方案
+Install:
 
 ```shell
-pip uninstall websocket
-pip uninstall websocket-client
-pip install websocket-client
+sudo apt-get install ffmpeg espeak-ng fonts-wqy-microhei
+python3 run.py --check
 ```
 
-1. 需准备一个时长大于50s的视频，有无背景音乐均可，命名为`in.mp4`
-2. 需准备一个时长大于50s的BGM，命名为`in.mp3`
-3. 提前在`args.txt`文本中定义好主体、事件、另一种说法
-4. 在`args.txt`文本中添加讯飞语音合成（流式版）的`APPID`、`APIKey`、`APISecret`，以英文分号`;`分隔
-5. 执行程序
+Optional clearer Mandarin voice (still local, still not 小燕):
 
-#### 示例
+```shell
+pip install -r requirements-voice.txt
+python3 run.py --download-voice
+```
 
-![](https://s1.ax1x.com/2020/06/27/Nc3ctK.png#shadow)
+`--download-voice` fetches about 61 MB from `huggingface.co/rhasspy/piper-voices` (`zh_CN-huayan-medium`, MIT) and checks SHA-256 `9929917bf8cabb26fd528ea44d3a6699c11e87317a14765312420be230be0f3d`. The weights stay in `models/` and are not committed. Piper is only used when that file is present. Its phoneme frontend is espeak; this port refuses voice configs that would download a second phonemizer model.
 
-![](https://s1.ax1x.com/2020/04/19/JuNLZD.png)
+Disk: the voice file is ~61 MB. A 50 second 640×360 sample was 1.6 MB. The web UI rejects a single upload over 200 MB and a request over 420 MB. The CLI rejects an input over 500 MB. Frames above 1920×1080 are scaled down. Temporary files go under `work/` (mode 0700) and the heavy intermediates are removed after a successful CLI run.
 
-### 设计思路
+CPU only. One 50 second 640×360 Piper render took about 6 seconds of wall clock on this machine. 1080p, 4K, and long GOP inputs were not timed. Peak RAM was not measured separately; the run finished on a 16 GB class VM without an out-of-memory kill.
 
-1. 剪裁视频→`getVideo()`
-2. 将台词写入文本→`getText(file)`
-3. 获取视频总时长→`getLength(video)`
-4. 给视频添加背景音乐→`add_audio(video, mp3, output='out.mp4')`
-5. 给视频添加字幕→`subTitle(text_file, video_file, output='out_sub.mp4')`
-6. 文本转人声→讯飞API
-7. 给视频添加人声→`add_people(mp3_file, video_file)`
-8. 清除中间生成的文件→`clean()`
+## Start
 
-### LICENSE
+Original layout, without putting a key on line 4 of `args.txt`:
 
-<a rel="license" href="http://creativecommons.org/licenses/by-nc-sa/4.0/"><img alt="知识共享许可协议" style="border-width:0" src="https://i.creativecommons.org/l/by-nc-sa/4.0/88x31.png" /></a><br/>本作品采用<a rel="license" href="http://creativecommons.org/licenses/by-nc-sa/4.0/">知识共享署名-非商业性使用-相同方式共享 4.0 国际许可协议</a>进行许可
+```shell
+# in.mp4 and in.mp3 are yours. Both are looped if they are shorter than 50s.
+python3 run.py --output final.mp4
+```
+
+No footage handy (this writes a test pattern, not a generated scene):
+
+```shell
+python3 run.py --synthetic --duration 50 --output final.mp4
+```
+
+Pick the phrases yourself:
+
+```shell
+python3 run.py --synthetic --body "核桃核" --thing "不能吞下去" \
+  --other "核桃核太大了，吞下去容易噎着" --tts piper --output final.mp4
+```
+
+Local page, loopback only:
+
+```shell
+python3 run.py --serve
+# http://127.0.0.1:8765/
+```
+
+The server refuses any host other than `127.0.0.1`. Do not put it on a public port.
+
+Bring your own narration wav/mp3 if you do not want TTS. It replaces the voice from t=0 and is **not** cut to the eight subtitle slots:
+
+```shell
+python3 run.py --video in.mp4 --bgm in.mp3 --narration narration.wav --output final.mp4
+```
+
+## `args.txt`
+
+```text
+核桃核
+不能吞下去
+核桃核太大了，吞下去容易噎着
+local
+black
+35
+```
+
+Lines are subject, event, other wording, ignored legacy credential slot, subtitle color, font size in pixels. Colors: `black`, `white`, `yellow`, `red`, `blue`, `green`, `cyan`, `orange`, or `#RRGGBB`. Font size is 12–96. On a 1080p frame, 35 pixels is small; raise it. Each phrase is limited to 80 characters.
+
+## Data handling
+
+- FFmpeg and espeak are started with argument lists. User text is not a shell command.
+- The page binds `127.0.0.1` and rejects a foreign `Host` header.
+- Uploads are stored under `work/jobs/<id>/` with generated names. Only `final.mp4`, `script.txt`, and `result.json` are served back, and only for that id.
+- One render at a time. Older jobs beyond the last 12 are deleted.
+- No analytics, no transcript upload, no read of environment secrets.
+
+`work/` can hold your footage until you delete it.
+
+## What was run
+
+`python3 -m unittest tests.test_pipeline` — 12 tests, about 10 seconds, all passing on this machine:
+
+- The eight lines and the 0/4/11/15/23/29/34/40 second slots at duration 50. Long lines insert ASS line breaks so they stay inside a 640-pixel frame.
+- Slot scaling at 25 seconds.
+- Rejection of control characters, and `args.txt` line 4 not copied into the parsed settings.
+- Multipart parsing of a text field and a file field.
+- 8 second gray synthetic clip: H.264 + audio, duration within 0.4 s, subtitle pixels in the lower band, upper band still flat gray. A subject containing `$(touch …)` did not create the touched file.
+- 50 second espeak timeline on a test pattern: duration 50 s, audible (mean level above -45 dB).
+- User-supplied 320×240 clip, short tone, and a narration file. Output stayed 320 wide and did not call TTS.
+- Loopback HTTP server: home page, multipart POST, 303 to the job, MP4 bytes, script visible. It listens on `127.0.0.1` only.
+- Source scan: the iFlytek websocket host and `CERT_NONE` are not in the Python sources.
+
+Sample file (not committed): 50.0 s, 640×360, 24 fps, H.264 + AAC stereo 44.1 kHz, 1.6 MB, mean volume about -22 dB. Piper speech for the walnut example fit the original slots with no speed-up. The picture is FFmpeg `testsrc`. Frames at 1 s, 16 s, 35 s, and 42 s show the matching subtitle lines, including the wrapped longer lines.
+
+## Not tested
+
+Windows and macOS. 1080p and the 4K downscale branch. Durations other than the unit-tested 8 s, 25 s (math only), and 50 s. Non-Mandarin text. Odd codecs, damaged files, and inputs near the size cap. Concurrent renders (the server returns 429 instead). A second download of the voice after the pinned file was already fetched. Listening quality beyond "the lines are present and timed"; Piper is intelligible in the sense that the phoneme timings fit, and it is still not 小燕. espeak at 2.3× on the shortest line is hard to follow.
+
+Runtime cost is local electricity and CPU. There is no per-render API fee because no paid API is called. Nothing here predicts views.
+
+## Layout
+
+`run.py` is the command. `rubbish_video/` holds the script template, TTS, ffmpeg assembly, and the loopback page. Upstream `ffmpeg.exe` and `ffprobe.exe` remain in the tree unused.
+
+License: [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). Credit wmathor. Non-commercial. Share derivatives the same way.

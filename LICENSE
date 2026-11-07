@@ -1,0 +1,25 @@
+Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+(CC BY-NC-SA 4.0)
+
+This repository is a derivative of Rubbish-Video-Generator by wmathor:
+
+  https://github.com/wmathor/Rubbish-Video-Generator
+
+The upstream README licenses that work under CC BY-NC-SA 4.0:
+
+  本作品采用知识共享署名-非商业性使用-相同方式共享 4.0 国际许可协议进行许可
+  https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+Modifications in the Ada-hubby fork, including the local no-paid-API
+assembler, are distributed under the same license. You must give appropriate
+credit, you may not use the material for commercial purposes, and if you
+remix or transform it you must distribute your contributions under the same
+license.
+
+This file points at the license. The legal code is at:
+
+  https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
+
+Upstream Windows builds ffmpeg.exe and ffprobe.exe remain in the git tree
+as they were published by the original project. This port does not execute
+them. FFmpeg is a separate work; see https://ffmpeg.org/legal.html.

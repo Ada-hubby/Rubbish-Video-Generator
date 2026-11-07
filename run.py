@@ -1,261 +1,136 @@
-import websocket
-import datetime
-import hashlib
-import base64
-import hmac
-import json
-from urllib.parse import urlencode
-import time
-import ssl
-from wsgiref.handlers import format_date_time
-from datetime import datetime
-from time import mktime
-import _thread as thread
-import io
-import os
-import subprocess
-import math
-from time import sleep
-from moviepy.editor import *
-import wave, audioop
+#!/usr/bin/env python3
+"""Local entry point for the Rubbish-Video-Generator assembler.
 
-body = '' # 定义主体
-thing = '' # 定义事件
-other_word = '' # 定义另一种说法
-in_mp4 = 'in_sub.mp4' # 输入视频
-in_mp3 = 'in.mp3' # 输入音频
-idx = 0
+The upstream script called iFlytek's streaming TTS. This entry point does
+not. Speech is espeak-ng or a local Piper ONNX voice.
 
-def getText(file): # 组装台词
-    with open(file) as f:
-        body = f.readline().strip()
-        thing = f.readline().strip()
-        other_word = f.readline().strip()
-    
-    # 主题框架
-    txt = '''{}{}是怎么回事呢？:4:0
-{}相信大家都很熟悉，但是{}{}是怎么回事呢？:7:4
-下面就让小编带大家一起了解吧:3:11
-{}{}，其实就是{}:8:15
-大家可能会很惊讶{}怎么会{}呢？:6:23
-但事实就是这样，小编也感到非常惊讶:5:29
-这就是关于{}{}的事情了，大家有什么想法呢？:6:34
-欢迎在评论区告诉小编一起讨论哦！:5:40'''.format(body, thing, body, body, thing, body, thing, other_word, body, thing, body, thing)
+Examples
+--------
+python3 run.py --check
+python3 run.py --download-voice
+python3 run.py --serve
+python3 run.py --synthetic --duration 50 --output final.mp4
+python3 run.py --video in.mp4 --bgm in.mp3 --args args.txt --output final.mp4
+"""
 
-    # 台词写入
-    with open('text.txt', mode='w') as f:
-        f.write(txt)
+from __future__ import annotations
 
-STATUS_FIRST_FRAME = 0  # 第一帧的标识
-STATUS_CONTINUE_FRAME = 1  # 中间帧标识
-STATUS_LAST_FRAME = 2  # 最后一帧的标识
+import argparse
+import sys
+from pathlib import Path
+
+from rubbish_video.pipeline import PipelineError, build_video, doctor
+from rubbish_video.script import load_args_file
+from rubbish_video.tts import TTSError, download_voice
+from rubbish_video.webui import serve
 
 
-class Ws_Param(object):
-    # 初始化
-    def __init__(self, APPID, APIKey, APISecret, Text):
-        self.APPID = APPID
-        self.APIKey = APIKey
-        self.APISecret = APISecret
-        self.Text = Text
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Local marketing-template video assembler (no paid APIs)")
+    parser.add_argument("--video", type=Path, help="Footage to loop or trim. Not generated from text.")
+    parser.add_argument("--bgm", type=Path, help="Background audio, ducked to -20 dB.")
+    parser.add_argument("--narration", type=Path, help="Use this audio instead of TTS. Not line-synced.")
+    parser.add_argument("--args", type=Path, help="Upstream args.txt. Line 4 credentials are ignored.")
+    parser.add_argument("--body", help="主体. Overrides args.txt line 1.")
+    parser.add_argument("--thing", help="事件. Overrides args.txt line 2.")
+    parser.add_argument("--other", help="另一种说法. Overrides args.txt line 3.")
+    parser.add_argument("--color", help="Subtitle color name or hex. Default from args.txt or black.")
+    parser.add_argument("--fontsize", type=int, help="Subtitle size in pixels. Default from args.txt or 35.")
+    parser.add_argument("--duration", type=float, default=50.0, help="Seconds. 50 matches the upstream slots.")
+    parser.add_argument("--tts", choices=("auto", "espeak", "piper"), default="auto")
+    parser.add_argument("--output", type=Path, default=Path("final.mp4"))
+    parser.add_argument("--synthetic", action="store_true", help="Generate a test pattern and a tone. No input files.")
+    parser.add_argument("--pattern", choices=("testsrc", "gray"), default="testsrc")
+    parser.add_argument("--keep-temp", action="store_true")
+    parser.add_argument("--serve", action="store_true", help="Serve the page on 127.0.0.1 only.")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--download-voice", action="store_true", help="Download the pinned Piper voice and exit.")
+    parser.add_argument("--check", action="store_true", help="Print local dependency status and exit.")
+    args = parser.parse_args(argv)
 
-        # 公共参数(common)
-        self.CommonArgs = {"app_id": self.APPID}
-        # 业务参数(business)，更多个性化参数可在官网查看
-        self.BusinessArgs = {"aue": "lame", "auf": "audio/L16;rate=16000", "vcn": "xiaoyan", "tte": "utf8","ent": "intp65", "sfl": 1, 'volume': 100}
-        self.Data = {"status": 2, "text": str(base64.b64encode(self.Text.encode('utf-8')), "UTF8")}
-        #使用小语种须使用以下方式，此处的unicode指的是 utf16小端的编码方式，即"UTF-16LE"”
-        #self.Data = {"status": 2, "text": str(base64.b64encode(self.Text.encode('utf-16')), "UTF8")}
-
-    # 生成url
-    def create_url(self):
-        url = 'wss://tts-api.xfyun.cn/v2/tts'
-        # 生成RFC1123格式的时间戳
-        now = datetime.now()
-        date = format_date_time(mktime(now.timetuple()))
-
-        # 拼接字符串
-        signature_origin = "host: " + "ws-api.xfyun.cn" + "\n"
-        signature_origin += "date: " + date + "\n"
-        signature_origin += "GET " + "/v2/tts " + "HTTP/1.1"
-        # 进行hmac-sha256进行加密
-        signature_sha = hmac.new(self.APISecret.encode('utf-8'), signature_origin.encode('utf-8'),
-                                 digestmod=hashlib.sha256).digest()
-        signature_sha = base64.b64encode(signature_sha).decode(encoding='utf-8')
-
-        authorization_origin = "api_key=\"%s\", algorithm=\"%s\", headers=\"%s\", signature=\"%s\"" % (
-            self.APIKey, "hmac-sha256", "host date request-line", signature_sha)
-        authorization = base64.b64encode(authorization_origin.encode('utf-8')).decode(encoding='utf-8')
-        # 将请求的鉴权参数组合为字典
-        v = {
-            "authorization": authorization,
-            "date": date,
-            "host": "ws-api.xfyun.cn"
-        }
-        # 拼接鉴权参数，生成url
-        url = url + '?' + urlencode(v)
-        return url
-
-def on_message(ws, message):
     try:
-        message =json.loads(message)
-        code = message["code"]
-        sid = message["sid"]
-        audio = message["data"]["audio"]
-        audio = base64.b64decode(audio)
-        status = message["data"]["status"]
-        print(message)
-        if status == 2:
-            print("ws is closed")
-            ws.close()
-        if code != 0:
-            errMsg = message["message"]
-            print("sid:%s call error:%s code is:%s" % (sid, errMsg, code))
-        else:
-            with open('./people{}.mp3'.format(idx), 'ab') as f:
-                f.write(audio)
-
-    except Exception as e:
-        print("receive msg,but parse exception:", e)
+        if args.download_voice:
+            path = download_voice()
+            print(f"Saved {path}")
+            print("SHA-256 checked. The file stays in models/ and is not uploaded anywhere.")
+            return 0
+        if args.check:
+            for line in doctor():
+                print(line)
+            return 0
+        if args.serve:
+            serve(args.port)
+            return 0
+        return _build(args)
+    except (PipelineError, TTSError, ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
+def _build(args: argparse.Namespace) -> int:
+    loaded = None
+    args_path = args.args
+    if args_path is None and not args.body and Path("args.txt").is_file():
+        args_path = Path("args.txt")
+    if args_path is not None:
+        loaded = load_args_file(args_path)
+        if loaded.ignored_legacy_credentials:
+            print(
+                "Ignoring args.txt line 4. iFlytek credentials are not read out or sent. "
+                "Voice is local."
+            )
+    body = args.body or (loaded.body if loaded else "")
+    thing = args.thing or (loaded.thing if loaded else "")
+    other = args.other or (loaded.other if loaded else "")
+    color = args.color or (loaded.color if loaded else "black")
+    fontsize = args.fontsize if args.fontsize is not None else (loaded.fontsize if loaded else 35)
 
-# 收到websocket错误的处理
-def on_error(ws, error):
-    print("### error:", error)
+    video = args.video
+    bgm = args.bgm
+    synthetic_video = False
+    synthetic_bgm = False
+    if args.synthetic:
+        if video or bgm:
+            raise PipelineError("Use either --synthetic or --video/--bgm, not both.")
+        synthetic_video = True
+        synthetic_bgm = True
+    else:
+        if video is None and Path("in.mp4").is_file():
+            video = Path("in.mp4")
+        if bgm is None and Path("in.mp3").is_file():
+            bgm = Path("in.mp3")
+        if video is None and bgm is None:
+            raise PipelineError(
+                "No in.mp4 / in.mp3 and no --video/--bgm. "
+                "Pass input files, or run with --synthetic to use a test pattern."
+            )
 
+    result = build_video(
+        output=args.output,
+        video=video,
+        bgm=bgm,
+        narration=args.narration,
+        body=body,
+        thing=thing,
+        other=other,
+        color=color,
+        fontsize=fontsize,
+        duration=args.duration,
+        tts=args.tts,
+        synthetic_video=synthetic_video,
+        synthetic_bgm=synthetic_bgm,
+        pattern=args.pattern,
+        keep_temp=args.keep_temp,
+    )
+    print(f"output: {result.output.resolve()}")
+    print(f"voice: {result.engine}")
+    print(f"picture: {result.width}x{result.height}, {result.duration:.0f}s, {result.elapsed_sec:.1f}s render, {result.output_bytes} bytes")
+    print(f"script: {result.script_path}")
+    for warning in result.warnings:
+        print(f"warning: {warning}")
+    print("This is a template composite, not generated footage, and not a claim about reach or virality.")
+    return 0
 
-# 收到websocket关闭的处理
-def on_close(ws):
-    print("### closed ###")
-
-
-# 收到websocket连接建立的处理
-def on_open(ws):
-    def run(*args):
-        d = {"common": wsParam.CommonArgs,
-             "business": wsParam.BusinessArgs,
-             "data": wsParam.Data,
-             }
-        d = json.dumps(d)
-        print("------>开始发送文本数据")
-        ws.send(d)
-        # if os.path.exists('people.mp3'):
-        #     os.remove('people.mp3')
-    thread.start_new_thread(run, ())
-
-def getVideo():
-    cmd =  'ffmpeg -y -i in.mp4 -ss 00:00:00 -t 00:00:50 -acodec copy -vcodec copy -async 1 in_sub.mp4'
-    subprocess.call(cmd, shell=True)
-
-def subTitle(text_file, video_file, output='out_sub.mp4'):
-    video1 = VideoFileClip(video_file)
-    sentences = [] # 台词列表
-    with open(text_file) as f:
-        text_tmp = f.readlines()
-        for i in text_tmp:
-            sentences.append(i.strip().split(':'))
-    print(sentences)
-    
-    txts = [] # 所有字幕剪辑
-    with open('args.txt') as f:
-        args = f.readlines()
-        color = args[4].strip()
-        fontsize = int(args[5].strip())
-        for sentence, span, start in sentences:
-            txt = (TextClip(sentence, fontsize=fontsize, align='center', color=color, font='SimHei')
-                    .set_position(("center","bottom")).set_duration(int(span)).set_start(int(start)))
-            txts.append(txt)
-
-    video2 = CompositeVideoClip([video1, *txts])
-    video2.write_videofile(output)
-    
-def getLength(video): # 获取视频时长
-    cmd = 'ffprobe -v quiet -select_streams v -show_entries stream=duration -of csv="p=0" {video}'.format(video=video)
-    seconds = os.popen(cmd, 'r')
-    seconds = math.ceil(float(seconds.read()))
-    m, s = divmod(seconds, 60)
-    h, m = divmod(m, 60)
-    return "%02d:%02d:%02d" % (h, m, s)
-
-def add_audio(video, mp3, output='out.mp4'): # 将背景音乐添加到视频中
-
-    BGM = 'ffmpeg -i {mp3} -ss 00:00:00.0 -t {time} -acodec copy BGM.mp3'.format(mp3=mp3, time=total_time)
-    subprocess.call(BGM, shell=True)
-
-    volume = 'ffmpeg -i BGM.mp3 -vcodec copy -af "volume=-20dB" BGM_volume.mp3'
-    subprocess.call(volume, shell=True)
-
-    BGM1 = 'ffmpeg -i {video} -c:v copy -an nosound.mp4'.format(video=video)
-    subprocess.call(BGM1)
-    
-    command = "ffmpeg -i {mp3} -i {video} -y {output}".format(video='nosound.mp4', mp3='BGM_volume.mp3', output=output)
-    subprocess.call(command, shell=True)
-
-
-def addPeople(mp3_file, video_file):
-    my_clip = VideoFileClip(video_file)
-    audio_background = AudioFileClip(mp3_file)
-    final_audio = CompositeAudioClip([my_clip.audio, audio_background])
-    final_clip = my_clip.set_audio(final_audio)
-    final_clip.write_videofile('final.mp4')
-
-def clean():
-    os.remove('in_sub.mp4')
-    os.remove('out.mp4')
-    os.remove('out_sub.mp4')
-    for i in range(8):
-        os.remove('people{}.mp3'.format(i))
-    os.remove('output0.mp3')
-    os.remove('test.mp3')
-    os.remove('BGM.mp3')
-    os.remove('BGM_volume.mp3')
-    os.remove('nosound.mp4')
 
 if __name__ == "__main__":
-    getVideo() # 裁剪视频
-    getText('args.txt') # 台词写入文本
-    total_time = getLength(in_mp4) # 获取视频总时长
-    add_audio(in_mp4, in_mp3) # 给视频添加背景音乐
-    subTitle('text.txt', 'out.mp4') # 给视频添加字幕
-
-    # 获取APPID、APIKey、APISecret
-    APPID, APIKey, APISecret = '', '', ''
-    with open('args.txt') as f:
-        APPID, APIKey, APISecret = f.readlines()[3].strip().split(';')
-
-    # 文本转人声
-    audio = []
-    cmd = 'ffmpeg -f lavfi -i aevalsrc=0 -t {} -q:a 9 -acodec libmp3lame output0.mp3'.format('00:00:01')
-    subprocess.call(cmd, shell=True)
-    with open('text.txt') as f:
-        text_tmp = f.readlines()
-        for i in text_tmp:
-            text = i.strip().split(':')[0]
-            span = int(i.strip().split(":")[1])
-            start = int(i.strip().split(':')[2])
-
-            wsParam = Ws_Param(APPID=APPID, APIKey=APIKey,
-                            APISecret=APISecret,
-                            Text=text)
-            websocket.enableTrace(False)
-            wsUrl = wsParam.create_url()
-            ws = websocket.WebSocketApp(wsUrl, on_message=on_message, on_error=on_error, on_close=on_close)
-            ws.on_open = on_open
-            ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
-            idx = idx + 1
-    
-    cmd = 'ffmpeg -i output0.mp3 -i people0.mp3 -i people1.mp3 -i people2.mp3 -i people3.mp3 -i people4.mp3 -i people5.mp3 -i people6.mp3 -i people7.mp3 -filter_complex "[1]adelay=0000|0000[del1],[2]adelay=4000|4000[del2],[3]adelay=11000|11000[del3],[4]adelay=15000|15000[del4],[5]adelay=23000|23000[del5],[6]adelay=29000|29000[del6],[7]adelay=34000|34000[del7],[8]adelay=40000|40000[del8], [0][del1][del2][del3][del4][del5][del6][del7][del8]amix=9" test.mp3'
-    subprocess.call(cmd, shell=True)
-    addPeople('test.mp3', 'out_sub.mp4') # 给视频添加人声
-    clean() # 清除中间生成的文件
-    print('Complete!')
-
-# 1. 裁剪视频 √
-# 2. 台词写入文本 √
-# 3. 获取视频总时长 √
-# 4. 给视频添加背景音乐 √
-# 5. 给视频添加字幕 √
-# 6. 文本转人声 √
-# 7. 给视频添加人声 √
-# 8. 清除中间生成的文件 √
+    raise SystemExit(main())

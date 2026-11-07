@@ -1,0 +1,3 @@
+# Optional. Local neural Mandarin voice. No API key.
+# The ONNX weights are a separate download (`python3 run.py --download-voice`).
+piper-tts==1.8.0

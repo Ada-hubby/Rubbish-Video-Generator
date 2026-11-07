@@ -1,0 +1,6 @@
+# The assembler itself uses the Python standard library.
+# System packages (not pip): ffmpeg (libass, libx264, aac), ffprobe,
+# espeak-ng, and a CJK font such as fonts-wqy-microhei.
+#
+# Optional higher-quality offline Mandarin voice: see requirements-voice.txt
+# and `python3 run.py --download-voice`.
