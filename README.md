@@ -72,6 +72,14 @@ python3 run.py --synthetic --body "核桃核" --thing "不能吞下去" \
   --other "核桃核太大了，吞下去容易噎着" --tts piper --output final.mp4
 ```
 
+Original silent-film demo, 9:16, about 32 seconds. It does not use the Chinese template or a voice. The picture is drawn silhouettes (not a test pattern, not a photograph). The score is synthesized in the program. It is a fictional story, and it is not a promise of views:
+
+```shell
+python3 run.py --drama --output window-seat.mp4
+```
+
+Pillow is imported only for that drawing pass: `pip install pillow`.
+
 Local page, loopback only:
 
 ```shell
@@ -112,7 +120,7 @@ Lines are subject, event, other wording, ignored legacy credential slot, subtitl
 
 ## What was run
 
-`python3 -m unittest tests.test_pipeline` — 12 tests, about 10 seconds, all passing on this machine:
+`python3 -m unittest tests.test_pipeline tests.test_drama` — 16 tests, about 12 seconds, all passing on this machine. `test_drama` checks the silent-film script only. The rendered MP4 was checked separately with ffprobe: 32.0 s, 720×1280, SAR 1:1, DAR 9:16, 24 fps, H.264 + stereo AAC, mean volume about -25 dB.
 
 - The eight lines and the 0/4/11/15/23/29/34/40 second slots at duration 50. Long lines insert ASS line breaks so they stay inside a 640-pixel frame.
 - Slot scaling at 25 seconds.

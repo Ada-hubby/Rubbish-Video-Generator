@@ -23,7 +23,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .script import BASE_DURATION, Line, build_lines, script_text
+from .script import BASE_DURATION, Line, build_lines, script_text, validate_lines
 from .tts import Engine, TTSError, resolve_engine, wav_duration
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -73,6 +73,10 @@ class BuildResult:
     synthetic_bgm: bool = False
     narration: bool = False
     workdir: Path | None = None
+    note: str = (
+        "Template assembler. The picture is the file you supplied "
+        "or a generated test pattern. It is not text-to-video."
+    )
 
     def to_json(self) -> dict:
         return {
@@ -88,10 +92,7 @@ class BuildResult:
             "synthetic_video": self.synthetic_video,
             "synthetic_bgm": self.synthetic_bgm,
             "narration": self.narration,
-            "note": (
-                "Template assembler. The picture is the file you supplied "
-                "or a generated test pattern. It is not text-to-video."
-            ),
+            "note": self.note,
         }
 
 
@@ -118,9 +119,9 @@ def doctor() -> list[str]:
 def build_video(
     *,
     output: Path,
-    body: str,
-    thing: str,
-    other: str,
+    body: str = "",
+    thing: str = "",
+    other: str = "",
     video: Path | None = None,
     bgm: Path | None = None,
     color: str = "black",
@@ -134,14 +135,37 @@ def build_video(
     workdir: Path | None = None,
     keep_temp: bool = False,
     timeout: int = 600,
+    lines: list[Line] | None = None,
+    silent: bool = False,
+    bgm_volume_db: float = -20.0,
+    subtitle_layout: str = "bottom",
+    crf: int = 23,
 ) -> BuildResult:
     started = time.perf_counter()
     _tools()
     duration = _check_duration(duration)
     fontsize = _check_fontsize(fontsize)
     fill, outline = _colors(color)
-    lines = build_lines(body, thing, other, duration)
+    if subtitle_layout not in {"bottom", "card"}:
+        raise PipelineError("subtitle layout must be bottom or card")
+    if not 16 <= int(crf) <= 30:
+        raise PipelineError("crf must be between 16 and 30")
+    if not -40.0 <= float(bgm_volume_db) <= 6.0:
+        raise PipelineError("background volume is out of range")
     warnings: list[str] = []
+    custom = lines is not None
+    if custom:
+        try:
+            lines = validate_lines(lines, duration)
+        except ValueError as exc:
+            raise PipelineError(str(exc)) from exc
+        warnings.append(
+            "Custom script. The eight-line Chinese template was not used."
+        )
+    else:
+        lines = build_lines(body, thing, other, duration)
+    if silent and narration is not None:
+        raise PipelineError("silent mode does not take a narration file")
 
     if pattern not in {"testsrc", "gray"}:
         raise PipelineError("pattern must be testsrc or gray")
@@ -174,20 +198,33 @@ def build_video(
         if narration is not None:
             narration = _safe_media(narration, "narration")
 
-        picture, width, height, fps = _prepare_picture(video, job / "picture.mp4", duration, timeout, warnings)
+        picture, width, height, fps = _prepare_picture(
+            video, job / "picture.mp4", duration, timeout, warnings, crf=int(crf)
+        )
         font, fontsdir = _font()
         ass_path = job / "subs.ass"
         ass_path.write_text(
-            _ass(lines, width, height, font, fontsize, fill, outline),
+            _ass(lines, width, height, font, fontsize, fill, outline, subtitle_layout),
             encoding="utf-8",
         )
         subtitled = job / "subtitled.mp4"
-        _burn_subs(picture, ass_path, fontsdir, subtitled, fps, timeout)
+        _burn_subs(picture, ass_path, fontsdir, subtitled, fps, timeout, crf=int(crf))
 
         reports: list[LineReport] = []
         mix = job / "mix.wav"
         engine_name: str
-        if narration is not None:
+        if silent:
+            engine_name = "silent (no TTS)"
+            warnings.append(
+                "No speech. The audio is only the background score, at "
+                f"{bgm_volume_db:.1f} dB."
+            )
+            _mix_score(bgm, mix, duration, float(bgm_volume_db), timeout)
+            reports = [
+                LineReport(line.text.replace("\n", " / "), round(line.start, 3), round(line.span, 3), 0.0, 1.0, False)
+                for line in lines
+            ]
+        elif narration is not None:
             engine_name = "user narration file (not line-synced)"
             warnings.append(
                 "Using the supplied narration file from the start of the video. "
@@ -210,7 +247,8 @@ def build_video(
                     "Voice is local Piper huayan, phonemized with espeak. "
                     "It is not the upstream iFlytek 小燕 voice, and it does not match that product."
                 )
-            voiced = _speak_lines(engine, lines, job, reports, warnings)
+            spoken = [line for line in lines if line.kind != "mark"]
+            voiced = _speak_lines(engine, spoken, job, reports, warnings)
             _mix_lines(bgm, voiced, reports, mix, duration, timeout)
 
         script_path = job / "script.txt"
@@ -239,6 +277,15 @@ def build_video(
             synthetic_bgm=any("sine tone" in item for item in warnings),
             narration=narration is not None,
             workdir=job if keep_temp else None,
+            note=(
+                "Custom script composite through the local assembler. "
+                "Not photorealistic text-to-video, and not a reach or virality claim."
+                if custom
+                else (
+                    "Template assembler. The picture is the file you supplied "
+                    "or a generated test pattern. It is not text-to-video."
+                )
+            ),
         )
         meta_src.write_text(json.dumps(result.to_json(), ensure_ascii=False, indent=2), encoding="utf-8")
         if not keep_temp:
@@ -446,7 +493,7 @@ def _synthetic_tone(dest: Path, duration: float, timeout: int) -> None:
 
 
 def _prepare_picture(
-    src: Path, dest: Path, duration: float, timeout: int, warnings: list[str]
+    src: Path, dest: Path, duration: float, timeout: int, warnings: list[str], crf: int = 23
 ) -> tuple[Path, int, int, float]:
     info = _probe(src)
     video = _stream(info, "video")
@@ -483,7 +530,7 @@ def _prepare_picture(
             f"{duration:.3f}",
             "-an",
             "-vf",
-            f"{scale},format=yuv420p",
+            f"{scale},setsar=1,format=yuv420p",
             "-r",
             f"{fps:.3f}",
             "-c:v",
@@ -491,7 +538,7 @@ def _prepare_picture(
             "-preset",
             "veryfast",
             "-crf",
-            "23",
+            str(int(crf)),
             str(dest),
         ],
         timeout,
@@ -558,14 +605,34 @@ def _ass(
     fontsize: int,
     fill_bgr: str,
     outline_bgr: str,
+    layout: str = "bottom",
 ) -> str:
+    margin_v = 36 if layout == "bottom" else max(120, int(height * 0.12))
+    if layout == "card":
+        # White letters, heavy black edge, lower third. The box is the picture scrim.
+        default_style = (
+            f"Style: Default,{font},{fontsize},&H00FFFFFF,&H00000000,&H00000000,&H00000000,"
+            f"0,0,0,0,100,100,0,0,1,6,0,2,78,78,{margin_v},1"
+        )
+    else:
+        default_style = (
+            f"Style: Default,{font},{fontsize},&H00{fill_bgr},&H00{fill_bgr},&H00{outline_bgr},&H64000000,"
+            f"0,0,0,0,100,100,0,0,1,3,0,2,40,40,{margin_v},1"
+        )
+    mark_style = (
+        f"Style: Mark,{font},26,&H00E4E4E4,&H00000000,&H00000000,&H00000000,"
+        "0,0,0,0,100,100,0,0,1,2,0,8,48,48,34,1"
+    )
     events = []
     for line in lines:
+        style_name = "Mark" if line.kind == "mark" else "Default"
+        text = _ass_escape(line.text) if line.kind == "mark" else _wrap_ass(line.text, width, fontsize)
         events.append(
-            "Dialogue: 0,{start},{end},Default,,0,0,0,,{text}".format(
+            "Dialogue: 0,{start},{end},{style},,0,0,0,,{text}".format(
                 start=_ass_time(line.start),
                 end=_ass_time(line.start + line.span),
-                text=_wrap_ass(line.text, width, fontsize),
+                style=style_name,
+                text=text,
             )
         )
     header = f"""[Script Info]
@@ -577,7 +644,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font},{fontsize},&H00{fill_bgr},&H00{fill_bgr},&H00{outline_bgr},&H64000000,0,0,0,0,100,100,0,0,1,3,0,2,40,40,36,1
+{default_style}
+{mark_style}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -599,11 +667,40 @@ def _ass_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
+def _char_units(ch: str) -> float:
+    if "\u2e80" <= ch <= "\u9fff" or "\uff00" <= ch <= "\uffef":
+        return 1.0
+    if ch == " ":
+        return 0.33
+    return 0.55
+
+
 def _wrap_ass(text: str, width: int, fontsize: int) -> str:
-    """Break CJK lines. libass will not wrap text that has no spaces."""
-    per_line = max(8, int((width - 80) / max(fontsize, 1)))
-    chunks = [text[i : i + per_line] for i in range(0, len(text), per_line)] or [text]
-    return r"\N".join(_ass_escape(chunk) for chunk in chunks)
+    """Break lines libass would otherwise draw as one overflowing row.
+
+    Newlines in the script are intentional phrase breaks. CJK glyphs count
+    as full width; Latin glyphs count as a bit over half.
+    """
+    max_units = max(6.0, (width - 160) / max(fontsize, 1))
+    rows: list[str] = []
+    for para in text.split("\n"):
+        buf = ""
+        units = 0.0
+        for ch in para:
+            needed = _char_units(ch)
+            if buf and units + needed > max_units:
+                rows.append(buf.rstrip())
+                buf = ""
+                units = 0.0
+                if ch == " ":
+                    continue
+            buf += ch
+            units += needed
+        if buf.strip():
+            rows.append(buf.strip())
+    if not rows:
+        rows = [text]
+    return r"\N".join(_ass_escape(row) for row in rows)
 
 
 def _filter_path(path: str) -> str:
@@ -615,7 +712,9 @@ def _filter_path(path: str) -> str:
     )
 
 
-def _burn_subs(picture: Path, ass_path: Path, fontsdir: str, dest: Path, fps: float, timeout: int) -> None:
+def _burn_subs(
+    picture: Path, ass_path: Path, fontsdir: str, dest: Path, fps: float, timeout: int, crf: int = 23
+) -> None:
     ffmpeg, _ffprobe = _tools()
     # Run in the job directory so the filter graph only names subs.ass,
     # never the subtitle sentence.
@@ -634,7 +733,7 @@ def _burn_subs(picture: Path, ass_path: Path, fontsdir: str, dest: Path, fps: fl
             "-preset",
             "veryfast",
             "-crf",
-            "23",
+            str(int(crf)),
             "-pix_fmt",
             "yuv420p",
             dest.name,
@@ -778,6 +877,31 @@ def _mix_narration(bgm: Path, narration: Path, dest: Path, duration: float, time
             ),
             "-map",
             "[a]",
+            "-t",
+            f"{duration:.3f}",
+            "-c:a",
+            "pcm_s16le",
+            str(dest),
+        ],
+        timeout,
+    )
+
+
+def _mix_score(bgm: Path, dest: Path, duration: float, volume_db: float, timeout: int) -> None:
+    ffmpeg, _ffprobe = _tools()
+    _run(
+        [
+            ffmpeg,
+            "-y",
+            "-stream_loop",
+            "-1",
+            "-i",
+            str(bgm),
+            "-af",
+            (
+                f"volume={volume_db:.2f}dB,atrim=0:{duration:.3f},"
+                f"apad=whole_dur={duration:.3f},aformat=sample_rates=44100:channel_layouts=stereo"
+            ),
             "-t",
             f"{duration:.3f}",
             "-c:a",

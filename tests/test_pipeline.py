@@ -32,6 +32,14 @@ class ScriptTests(unittest.TestCase):
         self.assertAlmostEqual(lines[1].start, 2.0)
         self.assertAlmostEqual(lines[1].span, 3.5)
 
+    def test_phrase_breaks_are_kept(self) -> None:
+        from rubbish_video.pipeline import _wrap_ass
+
+        wrapped = _wrap_ass("Keep the window.\nAndito na ako.", 720, 48)
+        self.assertIn(r"\N", wrapped)
+        self.assertIn("Keep the window.", wrapped)
+        self.assertIn("Andito na ako.", wrapped)
+
     def test_long_subtitle_wraps_on_a_narrow_frame(self) -> None:
         from rubbish_video.pipeline import _wrap_ass
 
@@ -178,6 +186,36 @@ class AssemblerTests(unittest.TestCase):
             info = _ffprobe(output)
             self.assertAlmostEqual(float(info["format"]["duration"]), 8.0, delta=0.4)
             self.assertEqual(info["streams"][0]["width"], 320)
+
+    def test_custom_silent_script_skips_the_chinese_template(self) -> None:
+        from rubbish_video.script import Line
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "silent.mp4"
+            result = build_video(
+                output=output,
+                lines=[
+                    Line("Hook line stays.", 4, 0, "card"),
+                    Line("Second card.", 4, 4, "card"),
+                    Line("Fictional story", 8, 0, "mark"),
+                ],
+                silent=True,
+                subtitle_layout="card",
+                synthetic_video=True,
+                synthetic_bgm=True,
+                pattern="gray",
+                duration=8,
+                fontsize=36,
+                bgm_volume_db=-8,
+            )
+            script = result.script_path.read_text(encoding="utf-8")
+            self.assertIn("Hook line stays.", script)
+            self.assertIn("Fictional story", script)
+            self.assertNotIn("是怎么回事", script)
+            self.assertIn("silent", result.engine)
+            self.assertIn("Custom script", " ".join(result.warnings))
+            info = _ffprobe(output)
+            self.assertIn("audio", {stream["codec_type"] for stream in info["streams"]})
 
 
 class WebTests(unittest.TestCase):

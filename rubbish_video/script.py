@@ -32,6 +32,7 @@ class Line:
     text: str
     span: float
     start: float
+    kind: str = "speech"
 
 
 def clean_phrase(value: str, label: str) -> str:
@@ -73,8 +74,38 @@ def build_lines(body: str, thing: str, other: str, duration: float = BASE_DURATI
 
 
 def script_text(lines: list[Line]) -> str:
-    rows = [f"[{line.start:.2f}-{line.start + line.span:.2f}] {line.text}" for line in lines]
+    rows = []
+    for line in lines:
+        tag = "mark " if line.kind == "mark" else ""
+        shown = line.text.replace("\n", " / ")
+        rows.append(f"[{tag}{line.start:.2f}-{line.start + line.span:.2f}] {shown}")
     return "\n".join(rows) + "\n"
+
+
+def validate_lines(lines: list[Line], duration: float) -> list[Line]:
+    """Check a custom card script. Does not build the Chinese template."""
+    if not lines:
+        raise ValueError("custom script is empty")
+    if len(lines) > 20:
+        raise ValueError("custom script has more than 20 lines")
+    allowed = {"speech", "card", "mark"}
+    checked: list[Line] = []
+    for line in lines:
+        if line.kind not in allowed:
+            raise ValueError(f"unknown line kind {line.kind!r}")
+        text = line.text.strip("\n")
+        if not text.strip():
+            raise ValueError("a script line is empty")
+        if len(text) > 180:
+            raise ValueError("a script line is longer than 180 characters")
+        if any(unicodedata.category(ch) == "Cc" and ch != "\n" for ch in text):
+            raise ValueError("a script line contains control characters")
+        if line.span <= 0 or line.start < 0:
+            raise ValueError("script times must be positive")
+        if line.start + line.span > duration + 0.05:
+            raise ValueError("a script line runs past the video duration")
+        checked.append(Line(text, float(line.span), float(line.start), line.kind))
+    return checked
 
 
 @dataclass(frozen=True)

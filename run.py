@@ -10,6 +10,7 @@ python3 run.py --check
 python3 run.py --download-voice
 python3 run.py --serve
 python3 run.py --synthetic --duration 50 --output final.mp4
+python3 run.py --drama --output window-seat.mp4
 python3 run.py --video in.mp4 --bgm in.mp3 --args args.txt --output final.mp4
 """
 
@@ -46,9 +47,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--download-voice", action="store_true", help="Download the pinned Piper voice and exit.")
     parser.add_argument("--check", action="store_true", help="Print local dependency status and exit.")
+    parser.add_argument(
+        "--drama",
+        action="store_true",
+        help="Render the original 9:16 silent-film demo. No TTS and no test pattern.",
+    )
     args = parser.parse_args(argv)
 
     try:
+        if args.drama:
+            if args.synthetic or args.video or args.bgm or args.narration:
+                raise PipelineError("--drama draws its own picture and score.")
+            from rubbish_video.drama import build_demo
+
+            result = build_demo(args.output)
+            print(f"output: {result.output.resolve()}")
+            print(f"voice: {result.engine}")
+            print(
+                f"picture: {result.width}x{result.height}, {result.duration:.0f}s, "
+                f"{result.elapsed_sec:.1f}s render, {result.output_bytes} bytes"
+            )
+            print(f"script: {result.script_path}")
+            for warning in result.warnings:
+                print(f"warning: {warning}")
+            print("Fictional silent film. Not footage from a prompt, and not a claim about reach.")
+            return 0
         if args.download_voice:
             path = download_voice()
             print(f"Saved {path}")
