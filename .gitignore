@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+work/
+models/
+final.mp4
+text.txt
+*.wav
+out.mp4
+out_sub.mp4
+in_sub.mp4
+nosound.mp4
+BGM.mp3
+BGM_volume.mp3
+people*.mp3
+output0.mp3
+test.mp3

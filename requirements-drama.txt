@@ -1,0 +1,3 @@
+# Optional. Only the silent-film demo (`python3 run.py --drama`) imports Pillow.
+# The marketing-template assembler does not.
+pillow>=10
